@@ -21,7 +21,7 @@ from homeassistant.components.ffmpeg import (
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.aiohttp_client import (
     async_aiohttp_proxy_stream)
-from homeassistant.helpers.service import extract_entity_ids
+from homeassistant.helpers.service import async_extract_entity_ids
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +37,8 @@ CONF_PROFILE = "profile"
 ATTR_PAN = "pan"
 ATTR_TILT = "tilt"
 ATTR_ZOOM = "zoom"
+ATTR_DISTANCE = "distance"
+ATTR_SPEED = "speed"
 
 DIR_UP = "UP"
 DIR_DOWN = "DOWN"
@@ -66,7 +68,9 @@ SERVICE_PTZ_SCHEMA = vol.Schema({
     ATTR_ENTITY_ID: cv.entity_ids,
     ATTR_PAN: vol.In([DIR_LEFT, DIR_RIGHT, PTZ_NONE]),
     ATTR_TILT: vol.In([DIR_UP, DIR_DOWN, PTZ_NONE]),
-    ATTR_ZOOM: vol.In([ZOOM_OUT, ZOOM_IN, PTZ_NONE])
+    ATTR_ZOOM: vol.In([ZOOM_OUT, ZOOM_IN, PTZ_NONE]),
+    vol.Optional(ATTR_DISTANCE, default=0.1): cv.small_float,
+    vol.Optional(ATTR_SPEED, default=0.5): cv.small_float,
 })
 
 
@@ -80,8 +84,10 @@ async def async_setup_platform(hass, config, async_add_entities,
         pan = service.data.get(ATTR_PAN, None)
         tilt = service.data.get(ATTR_TILT, None)
         zoom = service.data.get(ATTR_ZOOM, None)
+        distance = service.data.get(ATTR_DISTANCE, None)
+        speed = service.data.get(ATTR_SPEED, None)
         all_cameras = hass.data[ONVIF_DATA][ENTITIES]
-        entity_ids = extract_entity_ids(hass, service)
+        entity_ids = await async_extract_entity_ids(hass, service)
         target_cameras = []
         if not entity_ids:
             target_cameras = all_cameras
@@ -89,7 +95,7 @@ async def async_setup_platform(hass, config, async_add_entities,
             target_cameras = [camera for camera in all_cameras
                               if camera.entity_id in entity_ids]
         for camera in target_cameras:
-            await camera.async_perform_ptz(pan, tilt, zoom)
+            await camera.async_perform_ptz(pan, tilt, zoom, distance, speed)
 
     hass.services.async_register(DOMAIN, SERVICE_PTZ, async_handle_ptz,
                                  schema=SERVICE_PTZ_SCHEMA)
@@ -193,11 +199,12 @@ class ONVIFHassCamera(Camera):
 
             _LOGGER.debug("Setting up the ONVIF PTZ service")
 
-            if self._camera.get_service('ptz', create=False) is None:
-                _LOGGER.warning("PTZ is not available on this camera")
-            else:
+            try:
                 self._ptz_service = self._camera.create_ptz_service()
                 _LOGGER.debug("Completed set up of the ONVIF camera component")
+            except exceptions.ONVIFError as err:
+                _LOGGER.warning("PTZ is not available on this camera")
+
         except ClientConnectorError as err:
             _LOGGER.warning("Couldn't connect to camera '%s', but will "
                             "retry later. Error: %s",
@@ -209,17 +216,12 @@ class ONVIFHassCamera(Camera):
                           self._name, err)
         return
 
-    async def async_obtain_input_uri(self):
-        """Set the input uri for the camera."""
+    async def async_obtain_profile_token(self):
+        """Obtain profile token to use with requests."""
         from onvif import exceptions
 
-        _LOGGER.debug("Connecting with ONVIF Camera: %s on port %s",
-                      self._host, self._port)
-
         try:
-            _LOGGER.debug("Retrieving profiles")
-
-            media_service = self._camera.create_media_service()
+            media_service = self._camera.get_service('media')
 
             profiles = await media_service.GetProfiles()
 
@@ -235,10 +237,26 @@ class ONVIFHassCamera(Camera):
             _LOGGER.debug("Using profile index '%d'",
                           self._profile_index)
 
+            return profiles[self._profile_index].token
+        except exceptions.ONVIFError as err:
+            _LOGGER.error("Couldn't retrieve profile token of camera '%s'. Error: %s",
+                          self._name, err)
+            return None
+
+    async def async_obtain_input_uri(self):
+        """Set the input uri for the camera."""
+        from onvif import exceptions
+
+        _LOGGER.debug("Connecting with ONVIF Camera: %s on port %s",
+                      self._host, self._port)
+
+        try:
             _LOGGER.debug("Retrieving stream uri")
 
+            media_service = self._camera.get_service('media')
+
             req = media_service.create_type('GetStreamUri')
-            req.ProfileToken = profiles[self._profile_index].token
+            req.ProfileToken = await self.async_obtain_profile_token()
             req.StreamSetup = {'Stream': 'RTP-Unicast',
                                'Transport': {'Protocol': 'RTSP'}}
 
@@ -258,7 +276,7 @@ class ONVIFHassCamera(Camera):
                           self._name, err)
             return
 
-    async def async_perform_ptz(self, pan, tilt, zoom):
+    async def async_perform_ptz(self, pan, tilt, zoom, distance, speed):
         """Perform a PTZ action on the camera."""
         from onvif import exceptions
 
@@ -268,18 +286,28 @@ class ONVIFHassCamera(Camera):
             return
 
         if self._ptz_service:
-            pan_val = 1 if pan == DIR_RIGHT else -1 if pan == DIR_LEFT else 0
-            tilt_val = 1 if tilt == DIR_UP else -1 if tilt == DIR_DOWN else 0
-            zoom_val = 1 if zoom == ZOOM_IN else -1 if zoom == ZOOM_OUT else 0
-            req = {"Velocity": {
-                "PanTilt": {"_x": pan_val, "_y": tilt_val},
-                "Zoom": {"_x": zoom_val}}}
-            try:
-                _LOGGER.debug(
-                    "Calling PTZ | Pan = %d | Tilt = %d | Zoom = %d",
-                    pan_val, tilt_val, zoom_val)
+            pan_val = distance if pan == DIR_RIGHT else -distance if pan == DIR_LEFT else 0
+            tilt_val = distance if tilt == DIR_UP else -distance if tilt == DIR_DOWN else 0
+            zoom_val = distance if zoom == ZOOM_IN else -distance if zoom == ZOOM_OUT else 0
+            speed_val = speed # @TODO: implement limits
 
-                await self._ptz_service.ContinuousMove(req)
+            try:
+                req = self._ptz_service.create_type('RelativeMove')
+                req.ProfileToken = await self.async_obtain_profile_token()
+                req.Translation = {
+                    "PanTilt": {"x": pan_val, "y": tilt_val},
+                    "Zoom": {"x": zoom_val},
+                }
+                req.Speed = {
+                    "PanTilt": {"x": speed_val, "y": speed_val},
+                    "Zoom": {"x": speed_val},
+                }
+
+                _LOGGER.debug(
+                    "Calling PTZ | Pan = %d | Tilt = %d | Zoom = %d | Speed = %d",
+                    pan_val, tilt_val, zoom_val, speed_val)
+
+                await self._ptz_service.RelativeMove(req)
             except exceptions.ONVIFError as err:
                 if "Bad Request" in err.reason:
                     self._ptz_service = None
