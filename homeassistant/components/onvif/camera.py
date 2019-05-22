@@ -193,11 +193,11 @@ class ONVIFHassCamera(Camera):
 
             _LOGGER.debug("Setting up the ONVIF PTZ service")
 
-            if self._camera.get_service('ptz', create=False) is None:
-                _LOGGER.warning("PTZ is not available on this camera")
-            else:
+            try:
                 self._ptz_service = self._camera.create_ptz_service()
                 _LOGGER.debug("Completed set up of the ONVIF camera component")
+            catch exceptions.ONVIFError as err:
+                _LOGGER.warning("PTZ is not available on this camera. Error: %s", err)
         except ClientConnectorError as err:
             _LOGGER.warning("Couldn't connect to camera '%s', but will "
                             "retry later. Error: %s",
