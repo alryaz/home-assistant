@@ -85,19 +85,27 @@ onvif_ptz:
       description: Name(s) of entities to pan, tilt or zoom.
       example: 'camera.living_room_camera'
     pan:
-      description: "Direction of pan. Allowed values: LEFT, RIGHT."
+      description: "Direction of pan. Allowed values: LEFT, RIGHT, integers 0 to 100 (will be multiplied by step)."
       example: 'LEFT'
     tilt:
-      description: "Direction of tilt. Allowed values: DOWN, UP."
+      description: "Direction of tilt. Allowed values: DOWN, UP, integers 0 to 100 (will be multiplied by step)."
       example: 'DOWN'
     zoom:
-      description: "Zoom. Allowed values: ZOOM_IN, ZOOM_OUT"
-      example: "ZOOM_IN"
-    distance:
-      description: "Distance coefficient. Sets how much PTZ should be executed in one request. Allowed values: floating point numbers, 0 to 1"
-      default: 0.1
-      example: 0.1
-    speed:
-      description: "Speed coefficient. Sets how fast PTZ will be executed. Allowed values: floating point numbers, 0 to 1"
-      default: 0.5
+      description: 'Zoom. Allowed values: ZOOM_IN, ZOOM_OUT, integers 0 to 100 (will be multiplied by step).'
+      example: 'ZOOM_IN'
+    duration:
+      description: 'Duration of PTZ in seconds. Allowed values: positive floating pointing numbers. Setting this value to anything positive will invoke continuous movement instead of relative.'
+      default: 0
+      example: 5
+    speed_pan:
+      description: "Speed of panning. Allowed values: floating point numbers, 0 to 1"
+      default: 1
+      example: 0.5
+    speed_tilt:
+      description: "Speed of tilting. Allowed values: floating point numbers, 0 to 1"
+      default: 1
+      example: 0.5
+    speed_zoom:
+      description: "Speed zooming. Allowed values: floating point numbers, 0 to 1"
+      default: 1
       example: 0.5
