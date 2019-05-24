@@ -32,11 +32,11 @@ DEFAULT_PASSWORD = '888888'
 DEFAULT_ARGUMENTS = '-pred 1'
 DEFAULT_PROFILE = 0
 DEFAULT_SPEED = 1
-DEFAULT_STEP = 0.005
+
+CONVERSION_COEFFICIENT = 0.01
 
 CONF_PROFILE = "profile"
 CONF_PTZ_SPEED = "ptz_speed"
-CONF_PTZ_STEP = "ptz_step"
 
 ATTR_PAN = "pan"
 ATTR_TILT = "tilt"
@@ -54,7 +54,7 @@ DIR_RIGHT = "RIGHT"
 ZOOM_OUT = "ZOOM_OUT"
 ZOOM_IN = "ZOOM_IN"
 PTZ_NONE = "NONE"
-STEP = 20
+STEP = 10
 
 SERVICE_PTZ = "onvif_ptz"
 
@@ -77,20 +77,16 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
         vol.Optional(ATTR_TILT, default=DEFAULT_SPEED): TYPE_POSITIVE_EPSILON,
         vol.Optional(ATTR_ZOOM, default=DEFAULT_SPEED): TYPE_POSITIVE_EPSILON,
     })),
-    vol.Optional(CONF_PTZ_STEP, default=DEFAULT_STEP): vol.Any(TYPE_POSITIVE_EPSILON, vol.Schema({
-        vol.Optional(ATTR_PAN, default=DEFAULT_STEP): TYPE_POSITIVE_EPSILON,
-        vol.Optional(ATTR_TILT, default=DEFAULT_STEP): TYPE_POSITIVE_EPSILON,
-        vol.Optional(ATTR_ZOOM, default=DEFAULT_STEP): TYPE_POSITIVE_EPSILON,
-    })),
 })
 
 TYPE_POSITIVE_INTEGER = vol.All(vol.Coerce(int), vol.Range(min=0))
+TYPE_DISTANCE_INTEGER = vol.All(vol.Coerce(int), vol.Range(min=0, max=100))
 
 SERVICE_PTZ_SCHEMA = vol.Schema({
     ATTR_ENTITY_ID: cv.entity_ids,
-    ATTR_PAN: vol.Any(TYPE_POSITIVE_INTEGER, vol.In([DIR_LEFT, DIR_RIGHT, PTZ_NONE])),
-    ATTR_TILT: vol.Any(TYPE_POSITIVE_INTEGER, vol.In([DIR_UP, DIR_DOWN, PTZ_NONE])),
-    ATTR_ZOOM: vol.Any(TYPE_POSITIVE_INTEGER, vol.In([ZOOM_OUT, ZOOM_IN, PTZ_NONE])),
+    ATTR_PAN: vol.Any(TYPE_DISTANCE_INTEGER, vol.In([DIR_LEFT, DIR_RIGHT, PTZ_NONE])),
+    ATTR_TILT: vol.Any(TYPE_DISTANCE_INTEGER, vol.In([DIR_UP, DIR_DOWN, PTZ_NONE])),
+    ATTR_ZOOM: vol.Any(TYPE_DISTANCE_INTEGER, vol.In([ZOOM_OUT, ZOOM_IN, PTZ_NONE])),
     ATTR_DURATION: TYPE_POSITIVE_INTEGER,
     ATTR_PRESET: TYPE_POSITIVE_INTEGER,
     ATTR_SPEED_PAN: TYPE_POSITIVE_EPSILON,
@@ -162,7 +158,6 @@ class ONVIFHassCamera(Camera):
         _LOGGER.debug("Setting up the ONVIF camera component")
 
         self._ptz_speed = config.get(CONF_PTZ_SPEED)
-        self._ptz_step = config.get(CONF_PTZ_STEP)
         self._username = config.get(CONF_USERNAME)
         self._password = config.get(CONF_PASSWORD)
         self._host = config.get(CONF_HOST)
@@ -178,13 +173,6 @@ class ONVIFHassCamera(Camera):
                 ATTR_PAN: self._ptz_speed,
                 ATTR_TILT: self._ptz_speed,
                 ATTR_ZOOM: self._ptz_speed,
-            }
-
-        if isinstance(self._ptz_step, float):
-            self._ptz_step = {
-                ATTR_PAN: self._ptz_step,
-                ATTR_TILT: self._ptz_step,
-                ATTR_ZOOM: self._ptz_step,
             }
 
         _LOGGER.debug("Setting up the ONVIF camera device @ '%s:%s'",
@@ -347,12 +335,11 @@ class ONVIFHassCamera(Camera):
                 _LOGGER.debug('Speeds: %d, %d, %d', speed_pan_val, speed_tilt_val, speed_zoom_val)
                 _LOGGER.debug('Speed values: %s', self._ptz_speed)
 
-                pan_val = self._ptz_step[ATTR_PAN] * pan
-                tilt_val = self._ptz_step[ATTR_TILT] * tilt
-                zoom_val = self._ptz_step[ATTR_ZOOM] * zoom
+                pan_val = CONVERSION_COEFFICIENT * pan
+                tilt_val = CONVERSION_COEFFICIENT * tilt
+                zoom_val = CONVERSION_COEFFICIENT * zoom
 
                 _LOGGER.debug('Directions: %d, %d, %d', pan_val, tilt_val, zoom_val)
-                _LOGGER.debug('Step values: %s', self._ptz_step)
 
                 if preset is not None:
                     req = self._ptz_service.create_type('GotoPreset')
@@ -370,7 +357,7 @@ class ONVIFHassCamera(Camera):
                     # req.Timeout = 'P{}S'.format(duration)
 
                     _LOGGER.debug(
-                        "Calling PTZ | Pan = %d | Tilt = %d | Zoom = %d | Duration = %s",
+                        "Calling PTZ | Pan = %f | Tilt = %f | Zoom = %f | Duration = %s",
                         pan, tilt, zoom, duration
                     )
 
@@ -391,7 +378,7 @@ class ONVIFHassCamera(Camera):
                     }
 
                     _LOGGER.debug(
-                        "Calling PTZ | Pan = %d | Tilt = %d | Zoom = %d | Speed = %s",
+                        "Calling PTZ | Pan = %f | Tilt = %f | Zoom = %f | Speed = %s",
                         pan_val, tilt_val, zoom_val, self._ptz_speed
                     )
 
