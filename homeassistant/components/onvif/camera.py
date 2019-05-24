@@ -31,14 +31,17 @@ DEFAULT_USERNAME = 'admin'
 DEFAULT_PASSWORD = '888888'
 DEFAULT_ARGUMENTS = '-pred 1'
 DEFAULT_PROFILE = 0
+DEFAULT_SPEED = 0.5
+DEFAULT_STEP = 0.005
 
 CONF_PROFILE = "profile"
 
 ATTR_PAN = "pan"
 ATTR_TILT = "tilt"
 ATTR_ZOOM = "zoom"
-ATTR_DISTANCE = "distance"
+ATTR_STEP = "step"
 ATTR_SPEED = "speed"
+ATTR_CONTINUOUS = "continuous"
 
 DIR_UP = "UP"
 DIR_DOWN = "DOWN"
@@ -47,11 +50,26 @@ DIR_RIGHT = "RIGHT"
 ZOOM_OUT = "ZOOM_OUT"
 ZOOM_IN = "ZOOM_IN"
 PTZ_NONE = "NONE"
+PTZ_ENUM_STEP_EQUIVALENT = 20
 
-SERVICE_PTZ = "onvif_ptz"
+SERVICE_PTZ = CONF_PTZ = "onvif_ptz"
 
 ONVIF_DATA = "onvif"
 ENTITIES = "entities"
+
+TYPE_POSITIVE_EPSILON = vol.And(float, vol.Range(min=0, max=1))
+TYPE_PTZ_DISTANCE = vol.And(int, vol.Range(min=0, max=100))
+
+COMMON_SPEED_STEP_SCHEMA = vol.Schema({
+    ATTR_PAN: TYPE_POSITIVE_EPSILON,
+    ATTR_TILT: TYPE_POSITIVE_EPSILON,
+    ATTR_ZOOM: TYPE_POSITIVE_EPSILON,
+})
+
+COMMON_PTZ_OPTIONS_SCHEMA = vol.Schema({
+    ATTR_SPEED: vol.Any(TYPE_POSITIVE_EPSILON, COMMON_SPEED_STEP_SCHEMA),
+    ATTR_STEP: vol.Any(TYPE_POSITIVE_EPSILON, COMMON_SPEED_STEP_SCHEMA),
+})
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required(CONF_HOST): cv.string,
@@ -62,17 +80,16 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_EXTRA_ARGUMENTS, default=DEFAULT_ARGUMENTS): cv.string,
     vol.Optional(CONF_PROFILE, default=DEFAULT_PROFILE):
         vol.All(vol.Coerce(int), vol.Range(min=0)),
+    vol.Optional(CONF_PTZ): COMMON_PTZ_OPTIONS_SCHEMA,
 })
 
-SERVICE_PTZ_SCHEMA = vol.Schema({
+SERVICE_PTZ_SCHEMA = COMMON_PTZ_OPTIONS_SCHEMA.extend({
     ATTR_ENTITY_ID: cv.entity_ids,
-    ATTR_PAN: vol.In([DIR_LEFT, DIR_RIGHT, PTZ_NONE]),
-    ATTR_TILT: vol.In([DIR_UP, DIR_DOWN, PTZ_NONE]),
-    ATTR_ZOOM: vol.In([ZOOM_OUT, ZOOM_IN, PTZ_NONE]),
-    vol.Optional(ATTR_DISTANCE, default=0.1): cv.small_float,
-    vol.Optional(ATTR_SPEED, default=0.5): cv.small_float,
+    ATTR_PAN: vol.Any(TYPE_PTZ_DISTANCE, vol.In([DIR_LEFT, DIR_RIGHT, PTZ_NONE])),
+    ATTR_TILT: vol.Any(TYPE_PTZ_DISTANCE, vol.In([DIR_UP, DIR_DOWN, PTZ_NONE])),
+    ATTR_ZOOM: vol.Any(TYPE_PTZ_DISTANCE, vol.In([ZOOM_OUT, ZOOM_IN, PTZ_NONE])),
+    vol.Optional(ATTR_CONTINUOUS, default=False): bool,
 })
-
 
 async def async_setup_platform(hass, config, async_add_entities,
                                discovery_info=None):
@@ -84,10 +101,35 @@ async def async_setup_platform(hass, config, async_add_entities,
         pan = service.data.get(ATTR_PAN, None)
         tilt = service.data.get(ATTR_TILT, None)
         zoom = service.data.get(ATTR_ZOOM, None)
-        distance = service.data.get(ATTR_DISTANCE, None)
         speed = service.data.get(ATTR_SPEED, None)
+        step = service.data.get(ATTR_STEP, None)
+        continuous = service.data.get(ATTR_CONTINUOUS, None)
         all_cameras = hass.data[ONVIF_DATA][ENTITIES]
         entity_ids = await async_extract_entity_ids(hass, service)
+
+        if pan == DIR_RIGHT:
+            pan = PTZ_ENUM_STEP_EQUIVALENT
+        elif pan == DIR_LEFT:
+            pan = -PTZ_ENUM_STEP_EQUIVALENT
+        elif pan is None:
+            pan = 0
+
+        if tilt == DIR_UP:
+            tilt = PTZ_ENUM_STEP_EQUIVALENT
+        elif tilt == DIR_DOWN:
+            tilt = -PTZ_ENUM_STEP_EQUIVALENT
+        elif tilt is None:
+            tilt = 0
+
+        if zoom == ZOOM_IN:
+            zoom = PTZ_ENUM_STEP_EQUIVALENT
+        elif zoom == ZOOM_OUT:
+            zoom = -PTZ_ENUM_STEP_EQUIVALENT
+        elif zoom is None:
+            zoom = 0
+
+        _LOGGER.debug("PTZ action requested. Pan: %s, Tilt: %s, Zoom: %s, Speed: %s, Step: %s")
+
         target_cameras = []
         if not entity_ids:
             target_cameras = all_cameras
@@ -95,7 +137,7 @@ async def async_setup_platform(hass, config, async_add_entities,
             target_cameras = [camera for camera in all_cameras
                               if camera.entity_id in entity_ids]
         for camera in target_cameras:
-            await camera.async_perform_ptz(pan, tilt, zoom, distance, speed)
+            await camera.async_perform_ptz(pan, tilt, zoom, speed, step, continuous)
 
     hass.services.async_register(DOMAIN, SERVICE_PTZ, async_handle_ptz,
                                  schema=SERVICE_PTZ_SCHEMA)
@@ -123,6 +165,22 @@ class ONVIFHassCamera(Camera):
         from onvif import ONVIFCamera
 
         _LOGGER.debug("Setting up the ONVIF camera component")
+
+        ptz = config.get(CONF_PTZ)
+        if ptz is None:
+            ptz = {
+                ATTR_SPEED: {ATTR_PAN: DEFAULT_SPEED, ATTR_TILT: DEFAULT_SPEED, ATTR_ZOOM: DEFAULT_SPEED},
+                ATTR_STEP: {ATTR_PAN: DEFAULT_STEP, ATTR_TILT: DEFAULT_STEP, ATTR_ZOOM: DEFAULT_STEP}
+            }
+
+        for b in [ATTR_PAN, ATTR_TILT, ATTR_ZOOM]:
+            ptz[ATTR_SPEED][b] = ptz[ATTR_SPEED][b] if ptz[ATTR_SPEED][b] is not None else DEFAULT_SPEED
+            ptz[ATTR_STEP][b] = ptz[ATTR_STEP][b] if ptz[ATTR_STEP][b] is not None else DEFAULT_STEP
+
+        _LOGGER.debug("PTZ: %s", ptz)
+
+        self._ptz_speed = ptz[ATTR_SPEED]
+        self._ptz_step = ptz[ATTR_STEP]
 
         self._username = config.get(CONF_USERNAME)
         self._password = config.get(CONF_PASSWORD)
@@ -203,7 +261,7 @@ class ONVIFHassCamera(Camera):
             try:
                 self._ptz_service = self._camera.create_ptz_service()
                 _LOGGER.debug("Completed set up of the ONVIF camera component")
-            catch exceptions.ONVIFError as err:
+            except exceptions.ONVIFError as err:
                 _LOGGER.warning("PTZ is not available on this camera. Error: %s", err)
         except ClientConnectorError as err:
             _LOGGER.warning("Couldn't connect to camera '%s', but will "
@@ -276,7 +334,7 @@ class ONVIFHassCamera(Camera):
                           self._name, err)
             return
 
-    async def async_perform_ptz(self, pan, tilt, zoom, distance, speed):
+    async def async_perform_ptz(self, pan, tilt, zoom, speed, step, continuous):
         """Perform a PTZ action on the camera."""
         from onvif import exceptions
 
@@ -286,28 +344,49 @@ class ONVIFHassCamera(Camera):
             return
 
         if self._ptz_service:
-            pan_val = distance if pan == DIR_RIGHT else -distance if pan == DIR_LEFT else 0
-            tilt_val = distance if tilt == DIR_UP else -distance if tilt == DIR_DOWN else 0
-            zoom_val = distance if zoom == ZOOM_IN else -distance if zoom == ZOOM_OUT else 0
-            speed_val = speed # @TODO: implement limits
-
             try:
-                req = self._ptz_service.create_type('RelativeMove')
-                req.ProfileToken = await self.async_obtain_profile_token()
-                req.Translation = {
-                    "PanTilt": {"x": pan_val, "y": tilt_val},
-                    "Zoom": {"x": zoom_val},
-                }
-                req.Speed = {
-                    "PanTilt": {"x": speed_val, "y": speed_val},
-                    "Zoom": {"x": speed_val},
+                if speed is None:
+                    speed = self._ptz_speed
+                if step is None:
+                    step = self._ptz_step
+
+                speed_dict = {
+                    "PanTilt": {
+                        "x": speed[ATTR_PAN] if speed[ATTR_PAN] is not None else self._ptz_speed[ATTR_PAN],
+                        "y": speed[ATTR_TILT] if speed[ATTR_TILT] is not None else self._ptz_speed[ATTR_TILT],
+                    },
+                    "Zoom": {
+                        "x": speed[ATTR_ZOOM] if speed[ATTR_ZOOM] is not None else self._ptz_speed[ATTR_ZOOM],
+                    }
                 }
 
-                _LOGGER.debug(
-                    "Calling PTZ | Pan = %d | Tilt = %d | Zoom = %d | Speed = %d",
-                    pan_val, tilt_val, zoom_val, speed_val)
+                if continuous:
+                    _LOGGER.warning(
+                        "Continuous movement not yet implemented"
+                    )
+                else:
+                    pan_val = pan * (step[ATTR_PAN] if step[ATTR_PAN] is not None else self._ptz_step[ATTR_PAN])
+                    tilt_val = tilt * (step[ATTR_TILT] if step[ATTR_TILT] is not None else self._ptz_step[ATTR_TILT])
+                    zoom_val = zoom * (step[ATTR_ZOOM] if step[ATTR_ZOOM] is not None else self._ptz_step[ATTR_ZOOM])
 
-                await self._ptz_service.RelativeMove(req)
+                    req = self._ptz_service.create_type('RelativeMove')
+                    req.ProfileToken = await self.async_obtain_profile_token()
+                    req.Translation = {
+                        "PanTilt": {"x": pan_val, "y": tilt_val},
+                        "Zoom": {"x": zoom_val},
+                    }
+                    req.Speed = speed_dict
+
+                    _LOGGER.debug(
+                        "Calling PTZ | Pan = %d | Tilt = %d | Zoom = %d | Speed = (Pan: %d, Tilt: %d, Zoom: %d)",
+                        pan_val, tilt_val, zoom_val,
+                        speed_dict["PanTilt"]["x"],
+                        speed_dict["PanTilt"]["y"],
+                        speed_dict["Zoom"]["x"]
+                    )
+
+                    await self._ptz_service.RelativeMove(req)
+
             except exceptions.ONVIFError as err:
                 if "Bad Request" in err.reason:
                     self._ptz_service = None
