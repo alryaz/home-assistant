@@ -371,7 +371,7 @@ class ONVIFHassCamera(Camera):
 
                     _LOGGER.debug(
                         "Calling PTZ | Pan = %d | Tilt = %d | Zoom = %d | Duration = %s",
-                        pan, tilt, zoom, req.Timeout
+                        pan, tilt, zoom, duration
                     )
 
                     await self._ptz_service.ContinuousMove(req)
